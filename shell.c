@@ -1,4 +1,6 @@
 #include <errno.h>
+#include <fcntl.h>
+#include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,13 +34,14 @@ void sigchld_handler(int sig) {
   }
 }
 
-int comandosCriados(char *argv[]);
-int comandoCd(char *argv[]);
+int comandosCriados(char *[]);
+int comandoCd(char *[]);
 int comandoExit();
 int comandoJobs();
-int comandoFg(char *argv[]);
-int comandoBg(char *argv[]);
+int comandoFg(char *[]);
+int comandoBg(char *[]);
 void limparProcessos();
+void impressãoPrompt();
 
 int main(int argc, char *argv[]) {
 
@@ -46,7 +49,6 @@ int main(int argc, char *argv[]) {
   int pid;
   int status;
 
-  // Instala o manipulador de sinal para SIGCHLD
   struct sigaction sa;
   sa.sa_handler = &sigchld_handler;
   sigemptyset(&sa.sa_mask);
@@ -58,15 +60,7 @@ int main(int argc, char *argv[]) {
 
   while (1) {
     limparProcessos();
-    char *user = getenv("USER");
-    char hostname[1024];
-    char cwd[MAX_CMD_LEN];
-    char *argv[MAX_ARGS];
-
-    gethostname(hostname, 1024);
-    getcwd(cwd, 1024);
-
-    printf("\033[36m%s@%s:%s$ \033[0m", user, hostname, cwd);
+    impressãoPrompt();
     if (fgets(cmd, MAX_CMD_LEN, stdin) == NULL) {
       break;
     }
@@ -89,6 +83,18 @@ int main(int argc, char *argv[]) {
       argv[i - 1] = NULL;
     }
 
+    int fd = -1;
+    for (int j = 0; j < i; j++) {
+      if (strcmp(argv[j], ">") == 0) {
+        fd = open(argv[j + 1], O_CREAT | O_WRONLY | O_APPEND, 0666);
+        if (fd < 0) {
+          perror("Erro ao abrir o arquivo de log");
+          exit(EXIT_FAILURE);
+        }
+        argv[j] = NULL; // Remove o redirecionamento do argv
+        break;
+      }
+    }
     if (comandosCriados(argv) > 0) {
       continue;
     }
@@ -97,7 +103,13 @@ int main(int argc, char *argv[]) {
       perror("Erro ao criar processo filho\n");
     } else if (pid == 0) {
       setpgid(0, 0);
-      execvp(argv[0], argv);
+      if (fd != -1) {
+        dup2(fd, STDOUT_FILENO); // Redireciona a saída padrão para o arquivo
+        close(fd);
+      }
+      if (execvp(argv[0], argv) == -1) {
+        perror("Erro ao executar o comando");
+      }
       exit(EXIT_FAILURE);
     } else {
       process *p = malloc(sizeof(process));
@@ -241,4 +253,20 @@ void limparProcessos() {
       p = p->next;
     }
   }
+}
+
+void impressãoPrompt() {
+
+  struct passwd *pw;
+  pw = getpwuid(getuid());
+
+  char *user = pw->pw_name;
+  char hostname[1024];
+  char cwd[MAX_CMD_LEN];
+  char *argv[MAX_ARGS];
+
+  gethostname(hostname, 1024);
+  getcwd(cwd, 1024);
+
+  printf("\033[36m%s@%s:%s$ \033[0m", user, hostname, cwd);
 }
