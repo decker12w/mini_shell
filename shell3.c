@@ -1,3 +1,22 @@
+/*
+Autor: José Maia de Oliveira
+Data: 05/05/2024
+RA: 823395
+
+Estruturas implementadas:
+
+a. $ prog    X
+b. $ prog &   X             .
+c. $ prog parâmetros X
+d. $ prog parâmetros & X
+e. $ prog [parâmetros] > arquivo X
+f. $ prog1 | prog 2  Metáde da implementação. Ele so funciona para 2 comandos encadeados, 
+não para uma cadeia de comandos
+
+Comandos implementados: jobs, fg, bg, cd, exit
+
+*/
+
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -30,7 +49,8 @@ int comandoFg(char *[]);
 int comandoBg(char *[]);
 void limparProcessos();
 void impressãoPrompt();
-int comandoPs();
+process *criarProcesso(char *comando, char **argv, pid_t pid);
+void executarComandoComPipe(char *cmd);
 
 
 void sigchld_handler(int sig) {
@@ -38,14 +58,17 @@ void sigchld_handler(int sig) {
   while (p != NULL) {
     if (waitpid(p->pid, &(p->status), WNOHANG | WUNTRACED) > 0) {
       if (WIFEXITED(p->status)) {
-        printf("Processo %d terminou com status %d\n", p->pid, WEXITSTATUS(p->status));
+        printf("Processo %d terminou com status %d\n", p->pid,
+               WEXITSTATUS(p->status));
         p->completed = 1;
       } else if (WIFSIGNALED(p->status)) {
-        printf("Processo %d terminou devido ao sinal %d\n", p->pid, WTERMSIG(p->status));
+        printf("Processo %d terminou devido ao sinal %d\n", p->pid,
+               WTERMSIG(p->status));
         p->completed = 1;
       } else if (WIFSTOPPED(p->status)) {
         p->stopped = 1;
-        printf("Processo %d parou devido ao sinal %d\n", p->pid, WSTOPSIG(p->status));
+        printf("Processo %d parou devido ao sinal %d\n", p->pid,
+               WSTOPSIG(p->status));
       }
     }
     p = p->next;
@@ -55,13 +78,14 @@ void sigchld_handler(int sig) {
 int main(int argc, char *argv[]) {
 
   char cmd[MAX_CMD_LEN];
-  int pid;
+  int pid1, pid2;
   int status;
 
   struct sigaction sa;
   sa.sa_handler = &sigchld_handler;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = 0;
+
   if (sigaction(SIGCHLD, &sa, 0) == -1) {
     perror(0);
     exit(1);
@@ -75,10 +99,16 @@ int main(int argc, char *argv[]) {
     }
     cmd[strcspn(cmd, "\n")] = '\0';
 
+if (strchr(cmd, '|') != NULL) {
+      executarComandoComPipe(cmd);
+      continue;
+
+    }
     int i = 0;
     argv[i] = strtok(cmd, " ");
 
     while (argv[i] != NULL) {
+
       argv[++i] = strtok(NULL, " ");
     }
 
@@ -109,11 +139,13 @@ int main(int argc, char *argv[]) {
       argv[i - 1] = NULL;
     }
 
-    pid = fork();
-    if (pid < 0) {
+    pid1 = fork();
+    if (pid1 < 0) {
       perror("Erro ao criar processo filho\n");
-    } else if (pid == 0) {
+    } else if (pid1 == 0) {
+
       setpgid(0, 0);
+
       if (fd != -1) {
         dup2(fd, STDOUT_FILENO); // Redireciona a saída padrão para o arquivo
         close(fd);
@@ -122,23 +154,27 @@ int main(int argc, char *argv[]) {
         perror("Erro ao executar o comando");
       }
       exit(EXIT_FAILURE);
+
     } else {
-      process *p = malloc(sizeof(process));
-      p->comando = strdup(argv[0]);
-      p->argv = argv;
-      p->pid = pid;
-      p->completed = 0;
-      p->stopped = 0;
-      p->status = 0;
-      p->next = processes;
-      processes = p;
+      process *p = criarProcesso(cmd, argv, pid1);
 
       if (!background) {
-        int pid_filho = wait(&status);
+        int pid_filho = waitpid(pid1, &status, WUNTRACED);
+
         if (WIFEXITED(status)) {
           p->completed = 1;
           p->status = WEXITSTATUS(status);
         }
+        if (WIFSIGNALED(status)) {
+          p->completed = 1;
+          p->status = WTERMSIG(status);
+        }
+        if (WIFSTOPPED(status)) {
+          p->stopped = 1;
+          p->status = WSTOPSIG(status);
+        }
+      } else {
+        printf("Processo %d em execução em segundo plano\n", pid1);
       }
     }
   }
@@ -155,8 +191,21 @@ int comandosCriados(char *argv[]) {
     return comandoFg(argv);
   } else if (strcmp(argv[0], "bg") == 0) {
     return comandoBg(argv);
-  } 
+  }
   return -1;
+}
+
+process *criarProcesso(char *comando, char **argv, pid_t pid) {
+  process *p = malloc(sizeof(process));
+  p->comando = strdup(argv[0]);
+  p->argv = argv;
+  p->pid = pid;
+  p->completed = 0;
+  p->stopped = 0;
+  p->status = 0;
+  p->next = processes;
+  processes = p;
+  return p;
 }
 
 int comandoCd(char *argv[]) {
@@ -280,4 +329,47 @@ void impressãoPrompt() {
   getcwd(cwd, 1024);
 
   printf("\033[36m%s@%s:%s$ \033[0m", user, hostname, cwd);
+}
+void executarComandoComPipe(char *cmd) {
+  char *cmd1 = strtok(cmd, "|");
+  char *cmd2 = strtok(NULL, "|");
+
+  char *argv1[MAX_ARGS];
+  char *argv2[MAX_ARGS];
+
+  int i = 0;
+  argv1[i] = strtok(cmd1, " ");
+  while (argv1[i] != NULL) {
+    argv1[++i] = strtok(NULL, " ");
+  }
+
+  i = 0;
+  argv2[i] = strtok(cmd2, " ");
+  while (argv2[i] != NULL) {
+    argv2[++i] = strtok(NULL, " ");
+  }
+
+  int pipefd[2];
+  pipe(pipefd);
+
+  pid_t pid1 = fork();
+  if (pid1 == 0) {
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    execvp(argv1[0], argv1);
+    exit(EXIT_FAILURE);
+  }
+
+  pid_t pid2 = fork();
+  if (pid2 == 0) {
+    close(pipefd[1]);
+    dup2(pipefd[0], STDIN_FILENO);
+    execvp(argv2[0], argv2);
+    exit(EXIT_FAILURE);
+  }
+
+  close(pipefd[0]);
+  close(pipefd[1]);
+  waitpid(pid1, NULL, 0);
+  waitpid(pid2, NULL, 0);
 }
