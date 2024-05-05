@@ -12,27 +12,15 @@
 
 typedef struct process {
   struct process *next;
+  char *comando;
   char **argv;
   pid_t pid;
-  char completed;
-  char stopped;
+  int completed;
+  int stopped;
   int status;
 } process;
 
 process *processes = NULL;
-
-void sigchld_handler(int sig) {
-  process *p = processes;
-  while (p != NULL) {
-    if (waitpid(p->pid, &(p->status), WNOHANG) > 0) {
-      p->completed = 1;
-      if (WIFSTOPPED(p->status)) {
-        p->stopped = 1;
-      }
-    }
-    p = p->next;
-  }
-}
 
 int comandosCriados(char *[]);
 int comandoCd(char *[]);
@@ -42,6 +30,27 @@ int comandoFg(char *[]);
 int comandoBg(char *[]);
 void limparProcessos();
 void impressãoPrompt();
+int comandoPs();
+
+
+void sigchld_handler(int sig) {
+  process *p = processes;
+  while (p != NULL) {
+    if (waitpid(p->pid, &(p->status), WNOHANG | WUNTRACED) > 0) {
+      if (WIFEXITED(p->status)) {
+        printf("Processo %d terminou com status %d\n", p->pid, WEXITSTATUS(p->status));
+        p->completed = 1;
+      } else if (WIFSIGNALED(p->status)) {
+        printf("Processo %d terminou devido ao sinal %d\n", p->pid, WTERMSIG(p->status));
+        p->completed = 1;
+      } else if (WIFSTOPPED(p->status)) {
+        p->stopped = 1;
+        printf("Processo %d parou devido ao sinal %d\n", p->pid, WSTOPSIG(p->status));
+      }
+    }
+    p = p->next;
+  }
+}
 
 int main(int argc, char *argv[]) {
 
@@ -52,7 +61,7 @@ int main(int argc, char *argv[]) {
   struct sigaction sa;
   sa.sa_handler = &sigchld_handler;
   sigemptyset(&sa.sa_mask);
-  sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+  sa.sa_flags = 0;
   if (sigaction(SIGCHLD, &sa, 0) == -1) {
     perror(0);
     exit(1);
@@ -77,17 +86,15 @@ int main(int argc, char *argv[]) {
       comandoExit();
     }
 
-    int background = 0;
-    if (i > 0 && strcmp(argv[i - 1], "&") == 0) {
-      background = 1;
-      argv[i - 1] = NULL;
+    if (comandosCriados(argv) >= 0) {
+      continue;
     }
 
     int fd = -1;
     for (int j = 0; j < i; j++) {
       if (strcmp(argv[j], ">") == 0) {
         fd = open(argv[j + 1], O_CREAT | O_WRONLY | O_APPEND, 0666);
-        if (fd < 0) {
+        if (fd < 1) {
           perror("Erro ao abrir o arquivo de log");
           exit(EXIT_FAILURE);
         }
@@ -95,9 +102,13 @@ int main(int argc, char *argv[]) {
         break;
       }
     }
-    if (comandosCriados(argv) > 0) {
-      continue;
+
+    int background = 0;
+    if (i > 0 && strcmp(argv[i - 1], "&") == 0) {
+      background = 1;
+      argv[i - 1] = NULL;
     }
+
     pid = fork();
     if (pid < 0) {
       perror("Erro ao criar processo filho\n");
@@ -107,12 +118,13 @@ int main(int argc, char *argv[]) {
         dup2(fd, STDOUT_FILENO); // Redireciona a saída padrão para o arquivo
         close(fd);
       }
-      if (execvp(argv[0], argv) == -1) {
+      if ((execvp(argv[0], argv) == -1)) {
         perror("Erro ao executar o comando");
       }
       exit(EXIT_FAILURE);
     } else {
       process *p = malloc(sizeof(process));
+      p->comando = strdup(argv[0]);
       p->argv = argv;
       p->pid = pid;
       p->completed = 0;
@@ -143,7 +155,7 @@ int comandosCriados(char *argv[]) {
     return comandoFg(argv);
   } else if (strcmp(argv[0], "bg") == 0) {
     return comandoBg(argv);
-  }
+  } 
   return -1;
 }
 
@@ -168,7 +180,7 @@ int comandoExit() {
 int comandoJobs() {
   process *p = processes;
   while (p != NULL) {
-    printf("%d: %s", p->pid, p->argv[0]);
+    printf("%d: %s", p->pid, p->comando);
     if (p->completed) {
       printf(" - concluído");
     } else if (p->stopped) {
@@ -181,7 +193,6 @@ int comandoJobs() {
   }
   return 0;
 }
-
 int comandoFg(char *argv[]) {
   if (argv[1] == NULL) {
     fprintf(stderr, "Esperado argumento para \"fg\"\n");
